@@ -1,0 +1,619 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Champion Arena</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { background: #080810; overflow: hidden; }
+    canvas { display: block; }
+  </style>
+</head>
+<body>
+<canvas id="canvas"></canvas>
+<script>
+// ─── Setup ────────────────────────────────────────────────────────────────────
+
+const canvas = document.getElementById('canvas');
+const ctx = canvas.getContext('2d');
+let W, H;
+
+function resize() {
+  W = canvas.width  = window.innerWidth;
+  H = canvas.height = window.innerHeight;
+  initParticles();
+  if (state === 'game') computeArena();
+}
+window.addEventListener('resize', resize);
+
+// ─── State ────────────────────────────────────────────────────────────────────
+
+let state     = 'select'; // 'select' | 'game'
+let player    = null;
+let hoverCard = -1;
+
+// ─── Input ────────────────────────────────────────────────────────────────────
+
+const keys = {};
+const MOVE_KEYS = new Set(['KeyW','KeyA','KeyS','KeyD','ArrowUp','ArrowDown','ArrowLeft','ArrowRight']);
+
+window.addEventListener('keydown', e => {
+  keys[e.code] = true;
+  if (MOVE_KEYS.has(e.code) && state === 'game') e.preventDefault();
+  if (e.code === 'Escape' && state === 'game') returnToSelect();
+});
+window.addEventListener('keyup', e => { delete keys[e.code]; });
+
+const mouse = { x: -9999, y: -9999 };
+canvas.addEventListener('mousemove', e => { mouse.x = e.clientX; mouse.y = e.clientY; });
+canvas.addEventListener('click',     () => { if (state === 'select' && hoverCard >= 0) startGame(DEFS[hoverCard]); });
+
+// ─── Champion Definitions ─────────────────────────────────────────────────────
+
+const DEFS = [
+  {
+    id: 'tank',
+    name: 'Tank',
+    subtitle: 'Unyielding Defender',
+    desc: 'A fortress on legs. Nearly impossible to put down — but don\'t expect to win any races.',
+    color: '#4a9eff',
+    glow:  'rgba(74,158,255,0.4)',
+    speed: 130,
+    maxHp: 250,
+    radius: 28,
+    stats: { HP: 10, Speed: 3, Power: 5 },
+  },
+  {
+    id: 'mage',
+    name: 'Mage',
+    subtitle: 'Arcane Master',
+    desc: 'Commands devastating magical forces. Fragile as glass — but spells hit like a freight train.',
+    color: '#c44fff',
+    glow:  'rgba(196,79,255,0.4)',
+    speed: 175,
+    maxHp: 100,
+    radius: 18,
+    stats: { HP: 4, Speed: 7, Power: 10 },
+  },
+  {
+    id: 'assassin',
+    name: 'Assassin',
+    subtitle: 'Shadow Striker',
+    desc: 'Blink and you\'ll miss it. Strikes with lethal speed, then vanishes before you react.',
+    color: '#ff6b35',
+    glow:  'rgba(255,107,53,0.4)',
+    speed: 265,
+    maxHp: 80,
+    radius: 15,
+    stats: { HP: 3, Speed: 10, Power: 8 },
+  },
+];
+
+// ─── Background Particles ─────────────────────────────────────────────────────
+
+let particles = [];
+
+function initParticles() {
+  particles = Array.from({ length: 130 }, () => ({
+    x:     Math.random() * W,
+    y:     Math.random() * H,
+    r:     Math.random() * 1.2 + 0.3,
+    a:     Math.random() * 0.35 + 0.05,
+    phase: Math.random() * Math.PI * 2,
+    spd:   Math.random() * 0.4 + 0.1,
+  }));
+}
+
+function drawParticles(t) {
+  particles.forEach(p => {
+    const alpha = p.a * (0.55 + 0.45 * Math.sin(p.phase + t * p.spd));
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2);
+    ctx.fillStyle = `rgba(190,200,255,${alpha})`;
+    ctx.fill();
+  });
+}
+
+// ─── Arena ────────────────────────────────────────────────────────────────────
+
+let arenaX, arenaY, arenaW, arenaH;
+
+function computeArena() {
+  const pad = 72;
+  arenaX = pad;
+  arenaY = pad;
+  arenaW = W - pad * 2;
+  arenaH = H - pad * 2;
+}
+
+// ─── Player ───────────────────────────────────────────────────────────────────
+
+class Player {
+  constructor(def) {
+    this.def   = def;
+    this.x     = arenaX + arenaW / 2;
+    this.y     = arenaY + arenaH / 2;
+    this.hp    = def.maxHp;
+    this.pulse = 0;
+    this.trail = [];
+  }
+
+  update(dt) {
+    let dx = 0, dy = 0;
+    if (keys['KeyW']     || keys['ArrowUp'])    dy -= 1;
+    if (keys['KeyS']     || keys['ArrowDown'])  dy += 1;
+    if (keys['KeyA']     || keys['ArrowLeft'])  dx -= 1;
+    if (keys['KeyD']     || keys['ArrowRight']) dx += 1;
+
+    const moving = dx !== 0 || dy !== 0;
+
+    // Normalise diagonal
+    if (dx !== 0 && dy !== 0) { dx *= 0.7071; dy *= 0.7071; }
+
+    this.x += dx * this.def.speed * dt;
+    this.y += dy * this.def.speed * dt;
+
+    // Clamp inside arena
+    const r = this.def.radius;
+    this.x = Math.max(arenaX + r, Math.min(arenaX + arenaW - r, this.x));
+    this.y = Math.max(arenaY + r, Math.min(arenaY + arenaH - r, this.y));
+
+    // Movement trail
+    if (moving) {
+      this.trail.unshift({ x: this.x, y: this.y });
+      if (this.trail.length > 12) this.trail.pop();
+    } else {
+      if (this.trail.length > 0) this.trail.pop();
+    }
+
+    this.pulse += dt * (moving ? 5 : 2);
+  }
+
+  draw() {
+    const { color, glow, radius } = this.def;
+
+    // Trail
+    this.trail.forEach((t, i) => {
+      const frac  = 1 - i / this.trail.length;
+      const alpha = frac * 0.22;
+      const r     = radius * frac * 0.75;
+      ctx.beginPath();
+      ctx.arc(t.x, t.y, r, 0, Math.PI * 2);
+      ctx.fillStyle = color + Math.floor(alpha * 255).toString(16).padStart(2, '0');
+      ctx.fill();
+    });
+
+    // Outer glow pulse
+    const glowR = radius * 2.4 + Math.sin(this.pulse) * 5;
+    const grd   = ctx.createRadialGradient(this.x, this.y, radius * 0.4, this.x, this.y, glowR);
+    grd.addColorStop(0, glow);
+    grd.addColorStop(1, 'transparent');
+    ctx.beginPath();
+    ctx.arc(this.x, this.y, glowR, 0, Math.PI * 2);
+    ctx.fillStyle = grd;
+    ctx.fill();
+
+    // Body
+    ctx.beginPath();
+    ctx.arc(this.x, this.y, radius, 0, Math.PI * 2);
+    ctx.fillStyle = color;
+    ctx.fill();
+
+    // Specular highlight
+    const shine = ctx.createRadialGradient(
+      this.x - radius * 0.32, this.y - radius * 0.32, 0,
+      this.x - radius * 0.32, this.y - radius * 0.32, radius * 0.85
+    );
+    shine.addColorStop(0, 'rgba(255,255,255,0.38)');
+    shine.addColorStop(1, 'transparent');
+    ctx.beginPath();
+    ctx.arc(this.x, this.y, radius, 0, Math.PI * 2);
+    ctx.fillStyle = shine;
+    ctx.fill();
+
+    this.drawEmblem();
+  }
+
+  drawEmblem() {
+    const { id, radius } = this.def;
+    const s = radius * 0.46;
+
+    ctx.save();
+    ctx.translate(this.x, this.y);
+    ctx.strokeStyle = 'rgba(255,255,255,0.88)';
+    ctx.fillStyle   = 'rgba(255,255,255,0.88)';
+    ctx.lineWidth   = 2;
+    ctx.lineCap     = 'round';
+
+    if (id === 'tank') {
+      // Hexagonal shield
+      ctx.beginPath();
+      ctx.moveTo(0, -s);
+      ctx.lineTo( s * 0.78, -s * 0.32);
+      ctx.lineTo( s * 0.78,  s * 0.28);
+      ctx.lineTo(0,  s);
+      ctx.lineTo(-s * 0.78,  s * 0.28);
+      ctx.lineTo(-s * 0.78, -s * 0.32);
+      ctx.closePath();
+      ctx.stroke();
+    } else if (id === 'mage') {
+      // 4-pointed star
+      for (let i = 0; i < 4; i++) {
+        const a = (i / 4) * Math.PI * 2 - Math.PI / 4;
+        ctx.beginPath();
+        ctx.moveTo(0, 0);
+        ctx.lineTo(Math.cos(a) * s, Math.sin(a) * s);
+        ctx.stroke();
+      }
+      ctx.beginPath();
+      ctx.arc(0, 0, s * 0.26, 0, Math.PI * 2);
+      ctx.fill();
+    } else {
+      // Dagger
+      ctx.beginPath();
+      ctx.moveTo(0, -s);
+      ctx.lineTo(0,  s * 0.7);
+      ctx.moveTo(-s * 0.48, -s * 0.1);
+      ctx.lineTo( s * 0.48, -s * 0.1);
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.moveTo(-s * 0.22, s * 0.55);
+      ctx.lineTo(0, s);
+      ctx.lineTo( s * 0.22, s * 0.55);
+      ctx.stroke();
+    }
+
+    ctx.restore();
+  }
+}
+
+// ─── Utilities ────────────────────────────────────────────────────────────────
+
+function roundRect(x, y, w, h, r) {
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.lineTo(x + w - r, y);
+  ctx.arcTo(x + w, y, x + w, y + r, r);
+  ctx.lineTo(x + w, y + h - r);
+  ctx.arcTo(x + w, y + h, x + w - r, y + h, r);
+  ctx.lineTo(x + r, y + h);
+  ctx.arcTo(x, y + h, x, y + h - r, r);
+  ctx.lineTo(x, y + r);
+  ctx.arcTo(x, y, x + r, y, r);
+  ctx.closePath();
+}
+
+function wrapText(text, cx, y, maxW, lh) {
+  const words = text.split(' ');
+  let line = '';
+  let curY = y;
+  for (const word of words) {
+    const test = line ? line + ' ' + word : word;
+    if (ctx.measureText(test).width > maxW && line) {
+      ctx.fillText(line, cx, curY);
+      line = word;
+      curY += lh;
+    } else {
+      line = test;
+    }
+  }
+  if (line) ctx.fillText(line, cx, curY);
+}
+
+// ─── Card Layout ──────────────────────────────────────────────────────────────
+
+const CARD_W = 210;
+const CARD_H = 346;
+const CARD_GAP = 38;
+
+function getCards() {
+  const totalW = CARD_W * 3 + CARD_GAP * 2;
+  const sx = (W - totalW) / 2;
+  const sy = (H - CARD_H) / 2 - 14;
+  return DEFS.map((_, i) => ({ x: sx + i * (CARD_W + CARD_GAP), y: sy }));
+}
+
+// ─── Select Screen ────────────────────────────────────────────────────────────
+
+function drawSelectScreen(t) {
+  ctx.fillStyle = '#080810';
+  ctx.fillRect(0, 0, W, H);
+  drawParticles(t);
+
+  // Title
+  ctx.textAlign  = 'center';
+  ctx.shadowColor = '#6070ff';
+  ctx.shadowBlur  = 28;
+  ctx.font        = `bold ${Math.min(50, W / 22)}px "Segoe UI", sans-serif`;
+  ctx.fillStyle   = `rgba(255,255,255,${0.88 + 0.12 * Math.sin(t * 0.7)})`;
+  ctx.fillText('CHAMPION ARENA', W / 2, H * 0.1 + 6);
+  ctx.shadowBlur = 0;
+
+  ctx.font      = '15px "Segoe UI", sans-serif';
+  ctx.fillStyle = 'rgba(180,190,255,0.45)';
+  ctx.fillText('Choose your champion to enter the arena', W / 2, H * 0.1 + 34);
+
+  // Cards
+  const cards = getCards();
+
+  cards.forEach((card, i) => {
+    const def = DEFS[i];
+    const hov = hoverCard === i;
+    const cx  = card.x + CARD_W / 2;
+    const cy  = card.y - (hov ? 10 : 0);
+
+    // Card glow on hover
+    if (hov) { ctx.shadowColor = def.color; ctx.shadowBlur = 32; }
+
+    // Card bg
+    roundRect(card.x, cy, CARD_W, CARD_H, 14);
+    const bg = ctx.createLinearGradient(card.x, cy, card.x, cy + CARD_H);
+    bg.addColorStop(0, hov ? 'rgba(255,255,255,0.13)' : 'rgba(255,255,255,0.07)');
+    bg.addColorStop(1, hov ? 'rgba(255,255,255,0.05)' : 'rgba(255,255,255,0.02)');
+    ctx.fillStyle = bg;
+    ctx.fill();
+
+    ctx.strokeStyle = hov ? def.color : 'rgba(255,255,255,0.11)';
+    ctx.lineWidth   = hov ? 2 : 1;
+    roundRect(card.x, cy, CARD_W, CARD_H, 14);
+    ctx.stroke();
+    ctx.shadowBlur = 0;
+
+    // Avatar glow
+    const avY  = cy + 76;
+    const avGrd = ctx.createRadialGradient(cx, avY, 0, cx, avY, 52);
+    avGrd.addColorStop(0, def.glow);
+    avGrd.addColorStop(1, 'transparent');
+    ctx.beginPath();
+    ctx.arc(cx, avY, 52, 0, Math.PI * 2);
+    ctx.fillStyle = avGrd;
+    ctx.fill();
+
+    // Avatar body
+    const avR = def.radius * 1.45;
+    ctx.beginPath();
+    ctx.arc(cx, avY, avR, 0, Math.PI * 2);
+    ctx.fillStyle = def.color;
+    ctx.fill();
+
+    // Specular
+    const avShine = ctx.createRadialGradient(cx - avR * 0.3, avY - avR * 0.3, 0, cx, avY, avR);
+    avShine.addColorStop(0, 'rgba(255,255,255,0.28)');
+    avShine.addColorStop(1, 'transparent');
+    ctx.beginPath();
+    ctx.arc(cx, avY, avR, 0, Math.PI * 2);
+    ctx.fillStyle = avShine;
+    ctx.fill();
+
+    // Name
+    ctx.shadowColor = def.color;
+    ctx.shadowBlur  = hov ? 10 : 4;
+    ctx.font        = 'bold 19px "Segoe UI", sans-serif';
+    ctx.fillStyle   = def.color;
+    ctx.textAlign   = 'center';
+    ctx.fillText(def.name.toUpperCase(), cx, cy + 136);
+    ctx.shadowBlur  = 0;
+
+    ctx.font      = '12px "Segoe UI", sans-serif';
+    ctx.fillStyle = 'rgba(255,255,255,0.42)';
+    ctx.fillText(def.subtitle, cx, cy + 153);
+
+    // Stat bars
+    const statKeys  = Object.keys(def.stats);
+    const barStartY = cy + 173;
+    statKeys.forEach((key, si) => {
+      const val = def.stats[key];
+      const bx  = card.x + 14;
+      const by  = barStartY + si * 28;
+      const bw  = CARD_W - 28;
+
+      ctx.font      = '11px "Segoe UI", sans-serif';
+      ctx.fillStyle = 'rgba(255,255,255,0.52)';
+      ctx.textAlign = 'left';
+      ctx.fillText(key, bx, by + 11);
+
+      roundRect(bx + 52, by, bw - 52, 11, 5);
+      ctx.fillStyle = 'rgba(255,255,255,0.08)';
+      ctx.fill();
+
+      const fw = Math.max(0, (bw - 52) * (val / 10));
+      if (fw > 0) {
+        roundRect(bx + 52, by, fw, 11, 5);
+        ctx.fillStyle   = def.color;
+        ctx.globalAlpha = 0.82;
+        ctx.fill();
+        ctx.globalAlpha = 1;
+      }
+    });
+
+    // Description
+    ctx.font      = '11.5px "Segoe UI", sans-serif';
+    ctx.fillStyle = 'rgba(255,255,255,0.38)';
+    ctx.textAlign = 'center';
+    wrapText(def.desc, cx, cy + 266, CARD_W - 22, 17);
+
+    // Select button
+    const btnY = cy + CARD_H - 44;
+    roundRect(card.x + 16, btnY, CARD_W - 32, 30, 7);
+    ctx.fillStyle = hov ? def.color : 'rgba(255,255,255,0.07)';
+    ctx.fill();
+
+    ctx.strokeStyle = hov ? 'transparent' : def.color + '55';
+    ctx.lineWidth   = 1;
+    roundRect(card.x + 16, btnY, CARD_W - 32, 30, 7);
+    ctx.stroke();
+
+    ctx.font      = 'bold 12px "Segoe UI", sans-serif';
+    ctx.fillStyle = hov ? '#000' : def.color;
+    ctx.textAlign = 'center';
+    ctx.fillText('SELECT', cx, btnY + 20);
+  });
+
+  ctx.font      = '13px "Segoe UI", sans-serif';
+  ctx.fillStyle = 'rgba(255,255,255,0.22)';
+  ctx.textAlign = 'center';
+  ctx.fillText('Click a card to begin', W / 2, H - 22);
+}
+
+// ─── Game Screen ──────────────────────────────────────────────────────────────
+
+function drawGameScreen(t) {
+  ctx.fillStyle = '#0c0c18';
+  ctx.fillRect(0, 0, W, H);
+  drawParticles(t);
+
+  // Arena grid
+  ctx.strokeStyle = 'rgba(255,255,255,0.025)';
+  ctx.lineWidth   = 1;
+  const gs = 48;
+  for (let x = arenaX; x <= arenaX + arenaW; x += gs) {
+    ctx.beginPath(); ctx.moveTo(x, arenaY); ctx.lineTo(x, arenaY + arenaH); ctx.stroke();
+  }
+  for (let y = arenaY; y <= arenaY + arenaH; y += gs) {
+    ctx.beginPath(); ctx.moveTo(arenaX, y); ctx.lineTo(arenaX + arenaW, y); ctx.stroke();
+  }
+
+  // Arena border
+  const def = player.def;
+  ctx.shadowColor = def.color;
+  ctx.shadowBlur  = 14;
+  ctx.strokeStyle = def.color + 'aa';
+  ctx.lineWidth   = 2;
+  roundRect(arenaX, arenaY, arenaW, arenaH, 6);
+  ctx.stroke();
+  ctx.shadowBlur = 0;
+
+  // Corner brackets
+  const corners = [
+    [arenaX,          arenaY,           1,  1],
+    [arenaX + arenaW, arenaY,          -1,  1],
+    [arenaX,          arenaY + arenaH,  1, -1],
+    [arenaX + arenaW, arenaY + arenaH, -1, -1],
+  ];
+  const bracketLen = 22;
+  corners.forEach(([x, y, sx, sy]) => {
+    ctx.strokeStyle = def.color;
+    ctx.lineWidth   = 3;
+    ctx.shadowColor = def.color;
+    ctx.shadowBlur  = 10;
+    ctx.beginPath();
+    ctx.moveTo(x + sx * bracketLen, y);
+    ctx.lineTo(x, y);
+    ctx.lineTo(x, y + sy * bracketLen);
+    ctx.stroke();
+  });
+  ctx.shadowBlur = 0;
+
+  player.draw();
+  drawHUD(def);
+}
+
+function drawHUD(def) {
+  const pad = 14;
+  const pw  = 172;
+  const ph  = 62;
+
+  // Panel
+  roundRect(pad, pad, pw, ph, 10);
+  ctx.fillStyle = 'rgba(0,0,0,0.62)';
+  ctx.fill();
+  roundRect(pad, pad, pw, ph, 10);
+  ctx.strokeStyle = def.color + '88';
+  ctx.lineWidth   = 1.5;
+  ctx.stroke();
+
+  // Colour dot
+  ctx.beginPath();
+  ctx.arc(pad + 22, pad + 22, 9, 0, Math.PI * 2);
+  ctx.fillStyle   = def.color;
+  ctx.shadowColor = def.color;
+  ctx.shadowBlur  = 10;
+  ctx.fill();
+  ctx.shadowBlur = 0;
+
+  // Name
+  ctx.font      = 'bold 15px "Segoe UI", sans-serif';
+  ctx.fillStyle = '#fff';
+  ctx.textAlign = 'left';
+  ctx.fillText(def.name, pad + 38, pad + 27);
+
+  // HP text
+  ctx.font      = '11px "Segoe UI", sans-serif';
+  ctx.fillStyle = 'rgba(255,255,255,0.48)';
+  ctx.fillText(`HP  ${player.hp} / ${def.maxHp}`, pad + 10, pad + 44);
+
+  // HP bar
+  const hbx = pad + 10, hby = pad + 48, hbw = pw - 20, hbh = 8;
+  roundRect(hbx, hby, hbw, hbh, 4);
+  ctx.fillStyle = 'rgba(255,255,255,0.1)';
+  ctx.fill();
+
+  const pct   = player.hp / def.maxHp;
+  const hpCol = pct > 0.6 ? '#44ee88' : pct > 0.3 ? '#ffaa44' : '#ff4444';
+  if (pct > 0) {
+    roundRect(hbx, hby, hbw * pct, hbh, 4);
+    ctx.fillStyle = hpCol;
+    ctx.fill();
+  }
+
+  // Controls hint
+  ctx.font      = '12px "Segoe UI", sans-serif';
+  ctx.fillStyle = 'rgba(255,255,255,0.25)';
+  ctx.textAlign = 'right';
+  ctx.fillText('WASD / Arrow keys to move',      W - pad, H - 36);
+  ctx.fillText('ESC — back to champion select',  W - pad, H - 18);
+}
+
+// ─── Game Flow ────────────────────────────────────────────────────────────────
+
+function startGame(def) {
+  computeArena();
+  player = new Player(def);
+  state  = 'game';
+  canvas.style.cursor = 'none';
+}
+
+function returnToSelect() {
+  state  = 'select';
+  player = null;
+  canvas.style.cursor = 'default';
+}
+
+// ─── Main Loop ────────────────────────────────────────────────────────────────
+
+let lastTs = 0;
+
+function loop(ts) {
+  const dt = Math.min((ts - lastTs) / 1000, 0.05);
+  lastTs   = ts;
+  const t  = ts / 1000;
+
+  // Hover detection
+  if (state === 'select') {
+    const cards = getCards();
+    hoverCard = -1;
+    cards.forEach((c, i) => {
+      if (mouse.x >= c.x && mouse.x <= c.x + CARD_W &&
+          mouse.y >= c.y - 12 && mouse.y <= c.y + CARD_H) {
+        hoverCard = i;
+      }
+    });
+    canvas.style.cursor = hoverCard >= 0 ? 'pointer' : 'default';
+  }
+
+  if (state === 'game' && player) player.update(dt);
+
+  if (state === 'select') drawSelectScreen(t);
+  else if (state === 'game') drawGameScreen(t);
+
+  requestAnimationFrame(loop);
+}
+
+// ─── Boot ─────────────────────────────────────────────────────────────────────
+
+resize();
+requestAnimationFrame(ts => { lastTs = ts; requestAnimationFrame(loop); });
+</script>
+</body>
+</html>
