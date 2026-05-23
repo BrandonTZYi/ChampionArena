@@ -47,7 +47,10 @@ window.addEventListener('keyup', e => { delete keys[e.code]; });
 
 const mouse = { x: -9999, y: -9999 };
 canvas.addEventListener('mousemove', e => { mouse.x = e.clientX; mouse.y = e.clientY; });
-canvas.addEventListener('click',     () => { if (state === 'select' && hoverCard >= 0) startGame(DEFS[hoverCard]); });
+canvas.addEventListener('click', () => {
+  if (state === 'select' && hoverCard >= 0) startGame(DEFS[hoverCard]);
+  else if (state === 'game' && player) player.tryPunch(mouse.x, mouse.y);
+});
 
 // ─── Champion Definitions ─────────────────────────────────────────────────────
 
@@ -135,8 +138,11 @@ class Player {
     this.x     = arenaX + arenaW / 2;
     this.y     = arenaY + arenaH / 2;
     this.hp    = def.maxHp;
-    this.pulse = 0;
-    this.trail = [];
+    this.pulse       = 0;
+    this.trail       = [];
+    this.punches     = [];
+    this.punchCd     = 0;
+    this.PUNCH_CD    = 0.42;
   }
 
   update(dt) {
@@ -168,6 +174,18 @@ class Player {
     }
 
     this.pulse += dt * (moving ? 5 : 2);
+
+    // Punch cooldown + update active punches
+    if (this.punchCd > 0) this.punchCd = Math.max(0, this.punchCd - dt);
+    this.punches = this.punches.filter(p => !p.done);
+    this.punches.forEach(p => p.update(dt));
+  }
+
+  tryPunch(mx, my) {
+    if (this.def.id !== 'tank') return;
+    if (this.punchCd > 0) return;
+    this.punches.push(new Punch(this.x, this.y, mx, my, this.def.color));
+    this.punchCd = this.PUNCH_CD;
   }
 
   draw() {
@@ -213,6 +231,19 @@ class Player {
     ctx.fill();
 
     this.drawEmblem();
+
+    // Active punches (drawn on top of player body)
+    this.punches.forEach(p => p.draw());
+
+    // Cooldown arc around player
+    if (this.def.id === 'tank' && this.punchCd > 0) {
+      const frac = 1 - this.punchCd / this.PUNCH_CD;
+      ctx.beginPath();
+      ctx.arc(this.x, this.y, this.def.radius + 7, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * frac);
+      ctx.strokeStyle = this.def.color + 'bb';
+      ctx.lineWidth   = 3;
+      ctx.stroke();
+    }
   }
 
   drawEmblem() {
@@ -265,6 +296,122 @@ class Player {
     }
 
     ctx.restore();
+  }
+}
+
+// ─── Punch ────────────────────────────────────────────────────────────────────
+
+class Punch {
+  constructor(px, py, mx, my, color) {
+    const dx  = mx - px, dy = my - py;
+    const len = Math.sqrt(dx * dx + dy * dy) || 1;
+    this.dirX  = dx / len;
+    this.dirY  = dy / len;
+    this.angle = Math.atan2(dy, dx);
+    this.px    = px;
+    this.py    = py;
+    this.x     = px;
+    this.y     = py;
+    this.dist  = 0;
+    this.maxDist  = 115;
+    this.speed    = 540;
+    this.color    = color;
+    this.phase    = 'travel'; // 'travel' | 'impact'
+    this.impactT  = 0;
+    this.impactDur = 0.18;
+    this.done     = false;
+  }
+
+  update(dt) {
+    if (this.phase === 'travel') {
+      this.dist = Math.min(this.dist + this.speed * dt, this.maxDist);
+      this.x = this.px + this.dirX * this.dist;
+      this.y = this.py + this.dirY * this.dist;
+      if (this.dist >= this.maxDist) this.phase = 'impact';
+    } else {
+      this.impactT += dt;
+      if (this.impactT >= this.impactDur) this.done = true;
+    }
+  }
+
+  draw() {
+    if (this.phase === 'travel') {
+      // Arm trail from player to fist
+      if (this.dist > 6) {
+        const grad = ctx.createLinearGradient(this.px, this.py, this.x, this.y);
+        grad.addColorStop(0,   'transparent');
+        grad.addColorStop(0.35, this.color + '33');
+        grad.addColorStop(1,    this.color + 'bb');
+        ctx.beginPath();
+        ctx.moveTo(this.px, this.py);
+        ctx.lineTo(this.x,  this.y);
+        ctx.strokeStyle = grad;
+        ctx.lineWidth   = 5;
+        ctx.lineCap     = 'round';
+        ctx.stroke();
+      }
+
+      // Fist (rotated rounded rect)
+      ctx.save();
+      ctx.translate(this.x, this.y);
+      ctx.rotate(this.angle);
+
+      const fw = 24, fh = 17;
+      ctx.shadowColor = this.color;
+      ctx.shadowBlur  = 18;
+
+      roundRect(-fw / 2, -fh / 2, fw, fh, 5);
+      ctx.fillStyle = this.color;
+      ctx.fill();
+
+      // Knuckle highlights
+      ctx.shadowBlur  = 0;
+      ctx.fillStyle   = 'rgba(255,255,255,0.3)';
+      for (let i = 0; i < 3; i++) {
+        ctx.beginPath();
+        ctx.arc(-fw / 2 + 5 + i * 7, -fh / 2 + 4, 2.5, 0, Math.PI * 2);
+        ctx.fill();
+      }
+      ctx.restore();
+
+    } else {
+      // Impact burst
+      const t     = this.impactT / this.impactDur;
+      const alpha = 1 - t;
+      const r     = 16 + t * 34;
+      const hex   = Math.floor(alpha * 255).toString(16).padStart(2, '0');
+
+      ctx.save();
+      ctx.translate(this.x, this.y);
+
+      // Radial fill
+      const grd = ctx.createRadialGradient(0, 0, 0, 0, 0, r);
+      grd.addColorStop(0, this.color + Math.floor(alpha * 140).toString(16).padStart(2, '0'));
+      grd.addColorStop(1, 'transparent');
+      ctx.beginPath();
+      ctx.arc(0, 0, r, 0, Math.PI * 2);
+      ctx.fillStyle = grd;
+      ctx.fill();
+
+      // Expanding ring
+      ctx.beginPath();
+      ctx.arc(0, 0, r * 0.82, 0, Math.PI * 2);
+      ctx.strokeStyle = this.color + hex;
+      ctx.lineWidth   = 2.5;
+      ctx.stroke();
+
+      // Impact spokes (4 diagonal lines)
+      ctx.lineWidth = 2;
+      for (let i = 0; i < 4; i++) {
+        const a = this.angle + (i / 4) * Math.PI * 2;
+        ctx.beginPath();
+        ctx.moveTo(Math.cos(a) * r * 0.5, Math.sin(a) * r * 0.5);
+        ctx.lineTo(Math.cos(a) * r * 1.25, Math.sin(a) * r * 1.25);
+        ctx.strokeStyle = this.color + Math.floor(alpha * 180).toString(16).padStart(2, '0');
+        ctx.stroke();
+      }
+      ctx.restore();
+    }
   }
 }
 
@@ -561,7 +708,8 @@ function drawHUD(def) {
   ctx.font      = '12px "Segoe UI", sans-serif';
   ctx.fillStyle = 'rgba(255,255,255,0.25)';
   ctx.textAlign = 'right';
-  ctx.fillText('WASD / Arrow keys to move',      W - pad, H - 36);
+  ctx.fillText('WASD / Arrow keys to move',      W - pad, H - 54);
+  ctx.fillText('Click — punch (Tank)',           W - pad, H - 36);
   ctx.fillText('ESC — back to champion select',  W - pad, H - 18);
 }
 
